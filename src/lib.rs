@@ -1,4 +1,4 @@
-pub mod console;
+pub mod shell;
 
-mod network;
+mod net_proxy;
 mod paxos;

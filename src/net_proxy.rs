@@ -5,27 +5,19 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
 use tokio::stream::StreamExt;
 
+use crate::paxos::proposal::{Datagram, Incoming, Outgoing};
 use crate::paxos::*;
-use crate::paxos::proposal::{Incoming, Outgoing, Datagram};
 
 #[derive(Debug)]
-pub struct Broker {
+pub struct Proxy {
     local_id: usize,
-    addr_by_id: HashMap<usize, SocketAddr>,
-    // id_by_addr: HashMap<SocketAddr, usize>,
+    id2addr: HashMap<usize, SocketAddr>,
 }
 
-impl Broker {
-    pub fn new(local_id: usize, servers_addr: HashMap<usize, SocketAddr>) -> Arc<Self> {
-        // let id_by_addr: HashMap<SocketAddr, usize> =
-        //     servers_addr.iter().map(|(&k, &v)| (v, k)).collect();
-
-        let broker = Self {
-            local_id,
-            addr_by_id: servers_addr,
-            // id_by_addr,
-        };
-        Arc::new(broker)
+impl Proxy {
+    pub fn new(local_id: usize, id2addr: HashMap<usize, SocketAddr>) -> Arc<Self> {
+        let proxy = Self { local_id, id2addr };
+        Arc::new(proxy)
     }
 
     pub async fn run(
@@ -33,7 +25,7 @@ impl Broker {
         tx: Tx<Incoming>,
         rx: Rx<Outgoing>,
     ) -> Result<(), tokio::io::Error> {
-        let mut listener = TcpListener::bind(self.addr_by_id[&self.local_id]).await?;
+        let mut listener = TcpListener::bind(self.id2addr[&self.local_id]).await?;
         tokio::spawn(self.clone().serve_outflow(rx));
         while let Some(socket) = listener.incoming().next().await {
             tokio::spawn(Self::serve_inflow(socket?, tx.clone()));
@@ -62,7 +54,7 @@ impl Broker {
     async fn serve_outflow(self: Arc<Self>, mut rx: Rx<Outgoing>) {
         while let Some(Outgoing { dst, dgram }) = rx.next().await {
             dst.iter().for_each(|id| {
-                let addr = self.addr_by_id[id];
+                let addr = self.id2addr[id];
                 let dgram = dgram.clone();
                 let local_id = self.local_id;
                 let send_task = async move {

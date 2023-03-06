@@ -7,9 +7,9 @@ use super::{seq_num::SequenceNumber, ValueType};
 #[derive(Debug)]
 pub struct Proposal {
     pub(crate) seq: SequenceNumber,
-    pub(crate) value: Option<ValueType>,
-    pub(crate) wanted_value: ValueType,
-    pub(crate) highest_seq: Option<SequenceNumber>,
+    pub(crate) value: Option<ValueType>, // 我已经 accept 过的值
+    pub(crate) want_value: ValueType,    // 我想要设定的值
+    // pub(crate) highest_seq: Option<SequenceNumber>,
     pub(crate) prepared: HashSet<usize>,
     pub(crate) accepted: HashSet<usize>,
 }
@@ -28,8 +28,8 @@ impl AcceptedProposal {
 
 #[derive(Debug)]
 pub struct Incoming {
-    pub src: usize,
-    pub dgram: Datagram,
+    pub src: usize,      // 来源
+    pub dgram: Datagram, // 报文数据
 }
 
 #[derive(Debug)]

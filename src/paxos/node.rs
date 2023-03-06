@@ -92,13 +92,7 @@ impl Node {
                     self.last_promised = Some(seq);
                     // 将最后接受的值返回给它。
                     let resp = Response::Prepare(self.last_accepted_proposal);
-                    self.tx
-                        .unbounded_send(Outgoing {
-                            // 只返回给它一个结点
-                            dst: (src..src + 1).collect(),
-                            dgram: Datagram::Response(resp),
-                        })
-                        .unwrap();
+                    self.unicast(src, Datagram::Response(resp));
                 } else {
                     // 否则的话忽略请求
                     log!(
@@ -112,14 +106,9 @@ impl Node {
             Request::Accept { seq, value } => {
                 if self.last_promised.is_none() || self.last_promised.unwrap() <= seq {
                     self.last_accepted_proposal = Some(AcceptedProposal::new(seq, value));
-                    // 回应已接受
+                    // 回应已接受（accepted）
                     let resp = Response::Accepted { seq };
-                    self.tx
-                        .unbounded_send(Outgoing {
-                            dst: (src..src + 1).collect(),
-                            dgram: Datagram::Response(resp),
-                        })
-                        .unwrap();
+                    self.unicast(src, Datagram::Response(resp));
                 } else {
                     log!(
                         "Server#{} ignore req `{:?}` from #{}",
@@ -129,49 +118,48 @@ impl Node {
                     );
                 }
             }
+            // 请求本结点学习 value
             Request::Learn { value } => {
+                // 若已经学习过，那么两者必须要一致
                 if let Some(chosen_value) = self.chosen {
                     assert!(chosen_value == value);
+                } else {
+                    // 否则开始学习
+                    self.chosen = Some(value);
                 }
-                self.chosen = Some(value);
-                log!("Server#{} learned {}", self.self_id, self.chosen.unwrap());
+                log!("Server #{} learned {}", self.self_id, self.chosen.unwrap());
             }
             Request::Propose { value } => {
-                if let Some(proposal) = &self.proposal {
-                    if proposal.wanted_value == value {
-                        log!("Retry to propose `{}`", value);
-                    } else {
+                let seq = self.next_seq();
+                if self.chosen.is_none() {
+                    // 构造一个提案
+                    self.proposal = Some(Proposal {
+                        seq,
+                        value: None,
+                        want_value: value,
+                        prepared: HashSet::new(),
+                        accepted: HashSet::new(),
+                    });
+
+                    // 准备好 prepare 请求，并广播它
+                    let req = Request::Prepare { seq };
+                    self.boardcast(Datagram::Request(req));
+                } else {
+                    // 系统已经认定值了，不用再 Propose 了
+                    if Some(value) != self.chosen {
                         log!(
-                            "Override a existed proposal value `{}`.",
-                            proposal.wanted_value
+                            "proposal value `{}` fail, `{}` is chosen.",
+                            value,
+                            self.chosen.unwrap()
                         );
+                    } else {
+                        log!("proposal value `{}` is existed", value);
                     }
                 }
-                let seq = self.next_seq();
-                self.proposal = Some(Proposal {
-                    seq,
-                    value: None,
-                    wanted_value: value,
-                    highest_seq: None,
-                    prepared: HashSet::new(),
-                    accepted: HashSet::new(),
-                });
-                let req = Request::Prepare { seq };
-                self.tx
-                    .unbounded_send(Outgoing {
-                        dst: self.peers_id.clone(),
-                        dgram: Datagram::Request(req),
-                    })
-                    .unwrap();
             }
             Request::Query => {
                 let resp = Response::Query { val: self.chosen };
-                self.tx
-                    .unbounded_send(Outgoing {
-                        dst: (src..src + 1).collect(),
-                        dgram: Datagram::Response(resp),
-                    })
-                    .unwrap();
+                self.unicast(src, Datagram::Response(resp));
             }
         }
     }
@@ -185,62 +173,57 @@ impl Node {
         );
         match resp {
             Response::Prepare(accepted_proposal) => {
-                if let Some(ref mut proposal) = self.proposal {
-                    proposal.prepared.insert(src);
+                // 将自身的提案取出
+                if let Some(ref mut my_proposal) = self.proposal {
+                    // 如果已经有被选定的提案
                     if let Some(AcceptedProposal { seq, val }) = accepted_proposal {
-                        if proposal.prepared.len() <= self.peers_id.len() / 2 + 1
-                            && seq >= *proposal.highest_seq.get_or_insert(seq)
-                        {
-                            proposal.value = Some(val);
+                        assert!(my_proposal.seq >= seq);
+
+                        // 我也声明要提出这个值
+                        let req = Request::Accept {
+                            seq: my_proposal.seq,
+                            value: val,
+                        };
+                        // 并广播之，当然，这会导致一个 node 收到多个 accept
+                        self.boardcast(Datagram::Request(req));
+                    } else {
+                        // 否则就是还没有被选定提案
+                        my_proposal.prepared.insert(src);
+
+                        // Prepare 被大多数允许
+                        if my_proposal.prepared.len() >= self.peers_id.len() / 2 + 1 {
+                            // 那就继续提出 Accept 请求
+                            let req = Request::Accept {
+                                seq: my_proposal.seq,
+                                value: *my_proposal.value.get_or_insert(my_proposal.want_value),
+                            };
+                            self.boardcast(Datagram::Request(req));
                         }
                     }
-                    if proposal.prepared.len() == self.peers_id.len() / 2 + 1 {
-                        let req = Request::Accept {
-                            seq: proposal.seq,
-                            value: *proposal.value.get_or_insert(proposal.wanted_value),
-                        };
-                        self.tx
-                            .unbounded_send(Outgoing {
-                                dst: proposal.prepared.clone(),
-                                dgram: Datagram::Request(req),
-                            })
-                            .unwrap();
-                    }
                 } else {
-                    panic!("recv a resp for prepare, but no proposal presented");
+                    // 不可能还没有设定提案吧
+                    panic!("Why there is no proposal for me?");
                 }
             }
             Response::Accepted { seq } => {
-                // log!("handle accept resp seq: {}", seq);
-                if let Some(ref mut proposal) = self.proposal {
-                    if seq == proposal.seq {
-                        proposal.accepted.insert(src);
-                        if proposal.accepted.len() == 1 + self.peers_id.len() / 2 {
-                            assert!(proposal.value.is_some());
-                            let value = proposal.value.unwrap();
-                            if value == proposal.wanted_value {
-                                log!("proposal value `{}` success.", value);
-                            } else {
-                                log!(
-                                    "proposal value `{}` fail, `{}` is chosen.",
-                                    proposal.wanted_value,
-                                    value
-                                );
-                            }
-                            let req = Request::Learn {
-                                value: proposal.value.unwrap(),
-                            };
-                            log!("value accepted by majority: {}", value);
-                            self.tx
-                                .unbounded_send(Outgoing {
-                                    dst: self.peers_id.clone(),
-                                    dgram: Datagram::Request(req),
-                                })
-                                .unwrap();
-                        }
+                // 将自身提案取出，并且比较响应的序列号是否等于自身
+                if let Some(ref mut my_proposal) = self.proposal {
+                    assert!(seq == my_proposal.seq);
+
+                    // 提案已被接受
+                    my_proposal.accepted.insert(src);
+
+                    // 如果过半数接受
+                    if my_proposal.accepted.len() == self.peers_id.len() / 2 + 1 {
+                        my_proposal.value = Some(my_proposal.want_value);
+                        let value = my_proposal.value.unwrap();
+                        log!("value accepted by majority: {}", value);
+
+                        let req = Request::Learn { value };
+                        self.boardcast(Datagram::Request(req));
                     }
                 } else {
-                    panic!("recv an accepted response, but no proposal presented")
+                    panic!("recv an accepted response, but not my proposal !!!");
                 }
             }
             Response::Query { val } => {
@@ -251,5 +234,23 @@ impl Node {
                 }
             }
         }
+    }
+
+    pub(crate) fn boardcast(&self, msg: Datagram) {
+        self.tx
+            .unbounded_send(Outgoing {
+                dst: self.peers_id.clone(),
+                dgram: msg,
+            })
+            .unwrap();
+    }
+
+    pub(crate) fn unicast(&self, src: usize, msg: Datagram) {
+        self.tx
+            .unbounded_send(Outgoing {
+                dst: (src..src + 1).collect(),
+                dgram: msg,
+            })
+            .unwrap();
     }
 }

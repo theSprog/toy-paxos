@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::prelude::*;
 
-use crate::network::Broker;
+use crate::net_proxy::Proxy;
 use crate::paxos::node::Node;
 use crate::paxos::proposal::{Datagram, Request};
 use crate::paxos::ValueType;
@@ -107,21 +107,25 @@ impl Console {
 
     // 从端口 base_port 启动 server_num 个服务器
     pub fn start_servers(&mut self, server_num: usize, base_port: usize) {
-        let server_num = server_num + 1; // #0 for client.
+        let server_num = server_num + 1; // #0 转为客户端 client.
+
+        // 将 ID 和 addr 绑定起来，建立一种映射关系
         let addr_table: Arc<HashMap<usize, SocketAddr>> = Arc::new(
             ((base_port)..(base_port + server_num))
                 .enumerate()
                 .map(|(id, port)| (id, format!("127.0.0.1:{}", port).parse().unwrap()))
                 .collect(),
         );
+
+        // 为每一个 ID 都建立一条到其他 id 的连接，包括自己到自己
         let start_server = |id: usize| {
             let (itx, irx) = mpsc::unbounded();
             let (otx, orx) = mpsc::unbounded();
-            // skip client #0
-            let paxos = Node::new(id, (1..server_num).collect(), otx, irx);
-            let broker = Broker::new(id, (*addr_table).clone());
-            self.rt.spawn(broker.run(itx, orx));
-            self.rt.spawn(paxos.run());
+            // 跳过客户端 #0
+            let node = Node::new(id, (1..server_num).collect(), otx, irx);
+            let proxy = Proxy::new(id, (*addr_table).clone());
+            self.rt.spawn(proxy.run(itx, orx));
+            self.rt.spawn(node.run());
         };
         (0..server_num).for_each(|id| {
             start_server(id);
@@ -166,4 +170,6 @@ impl Console {
             println_flushed!("error: servers haven't started.");
         }
     }
+
+    pub fn exit(self) {}
 }
