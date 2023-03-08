@@ -1,7 +1,6 @@
 [package]
 name = "paxos"
 version = "0.2.0"
-authors = ["whfuyn <whfuyn@outlook.com>"]
 edition = "2021"
 
 [dependencies]
